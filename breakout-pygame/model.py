@@ -8,11 +8,13 @@ class Linear_QNet(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
         super().__init__()
         self.linear1 = nn.Linear(input_size, hidden_size)
-        self.linear2 = nn.Linear(hidden_size, output_size)
+        self.linear2 = nn.Linear(hidden_size, hidden_size)  # Add additional hidden layer
+        self.linear3 = nn.Linear(hidden_size, output_size)  # Adjust output size if necessary
 
     def forward(self, x):
         x = F.relu(self.linear1(x))
-        x = self.linear2(x)
+        x = F.relu(self.linear2(x))  # Apply activation function to additional hidden layer
+        x = self.linear3(x)  # Adjust output layer
         return x
 
     def save(self, file_name='model.pth'):
@@ -25,30 +27,29 @@ class Linear_QNet(nn.Module):
 
 
 class QTrainer:
-    def __init__(self, model, target_model, lr, gamma):
+    def __init__(self, model, target_model, lr, gamma, update_target_frequency=2000):
         self.lr = lr
         self.gamma = gamma
         self.model = model
         self.target_model = target_model
         self.optimizer = optim.Adam(model.parameters(), lr=self.lr)
         self.criterion = nn.MSELoss()
+        self.update_target_frequency = update_target_frequency
+        self.steps_since_last_target_update = 0
 
     def train_step(self, states, actions, rewards, next_states, dones):
         states = torch.tensor(states, dtype=torch.float)
         next_states = torch.tensor(next_states, dtype=torch.float)
-        actions = torch.tensor(actions, dtype=torch.long)
+        actions = torch.tensor(actions, dtype=torch.long).view(-1)  # Reshape actions tensor
 
         Q = self.model(states)
         Q_target = Q.clone().detach()
 
         for idx in range(len(next_states)):
-            action_idx = actions[idx].item()
+            action_idx = actions[idx].item()  # Accessing single item
             reward_value = rewards[idx].item() if rewards.dim() > 1 else rewards.item()
 
-            if isinstance(dones, torch.Tensor):
-                done_value = bool(dones[idx].item())
-            else:
-                done_value = bool(dones)
+            done_value = bool(dones[idx].item()) if isinstance(dones, torch.Tensor) else bool(dones)
 
             if done_value:
                 Q_target[idx] = reward_value
@@ -67,12 +68,14 @@ class QTrainer:
         loss.backward()
         self.optimizer.step()
 
-        # Logging
-        print("Model weights:")
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                print(name, param.data)
+        # Update target network parameters
+        self.steps_since_last_target_update += 1
+        if self.steps_since_last_target_update >= self.update_target_frequency:
+            self.update_target_model()
+            self.steps_since_last_target_update = 0
 
-        print("Optimizer state:")
-        for param_group in self.optimizer.param_groups:
-            print("Learning rate:", param_group['lr'])
+        return loss.item()  # Return the loss for monitoring in training loop
+
+
+    def update_target_model(self):
+        self.target_model.load_state_dict(self.model.state_dict())

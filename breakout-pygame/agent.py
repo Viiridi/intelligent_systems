@@ -6,92 +6,77 @@ from game import BreakoutGameAI
 from model import Linear_QNet, QTrainer
 from helper import plot
 
-MAX_MEMORY = 100_000
-BATCH_SIZE = 1000
-LEARNING_RATE = 0.0001
+MAX_MEMORY = 300_000
+BATCH_SIZE = 256
+LEARNING_RATE = 0.00005
 HEIGHT = 600
 WIDTH = 800
 
+GAMMA = 0.95
+EPSILON_MAX = 1.0
+EPSILON_MIN = 0.01
+EPSILON_DECAY = 0.995
+
+PADDLE_SPEED = 12
+
 class Agent:
-    def __init__(self, bricks):
-        # Initialize main and target networks
-        input_size = 7
-        hidden_size = 256
+    def __init__(self, bricks, epsilon_decay=EPSILON_DECAY):
+        input_size = 16
+        hidden_size = 1024
         output_size = 3
         self.model = Linear_QNet(input_size, hidden_size, output_size)
         self.target_model = Linear_QNet(input_size, hidden_size, output_size)
         self.target_model.load_state_dict(self.model.state_dict())
-        self.target_model.eval()  # Set target model to evaluation mode
+        self.target_model.eval()
+        self.epsilon_decay = EPSILON_DECAY
 
         self.n_games = 0
-        self.epsilon_min = 0.1
-        self.epsilon_max = 1.0
+        self.epsilon_min = EPSILON_MIN
+        self.epsilon_max = EPSILON_MAX
         self.epsilon = self.epsilon_max
-        self.gamma = 0.99
+        self.epsilon_decay = epsilon_decay
+
+        self.gamma = GAMMA
         self.memory = deque(maxlen=MAX_MEMORY)
 
-        # Store bricks as an attribute
         self.bricks = bricks
 
-        # Initialize QTrainer with both main and target models
         self.trainer = QTrainer(self.model, self.target_model, lr=LEARNING_RATE, gamma=self.gamma)
 
-    def get_state(self, game):
-        paddle_x = game.paddle.x
-        paddle_width = game.paddle.width
-        ball_x = game.ball.x
-        ball_y = game.ball.y
-        ball_speed_x, ball_speed_y = game.ball_speed
+        # Add a list to store exploration rates
+        self.exploration_rates = []
+        self.q_value_predictions = []  # List to store predicted Q-values during training steps
 
-        # Calculate distances from the ball to the paddle and bricks
-        distance_to_paddle = abs(ball_y - game.paddle.y)
 
-        min_distance_to_brick = float('inf')
-        for brick, _ in game.bricks:
-            # Calculate distance to each brick and find the minimum
-            distance_to_brick = np.linalg.norm(np.array([ball_x, ball_y]) - np.array([brick.x + game.brick_width / 2, brick.y + game.brick_height / 2]))
-            min_distance_to_brick = min(min_distance_to_brick, distance_to_brick)
-
-        # Normalize distances
-        normalized_distance_to_paddle = distance_to_paddle / HEIGHT
-        normalized_distance_to_brick = min_distance_to_brick / np.sqrt(HEIGHT**2 + WIDTH**2)  # Diagonal length of the game window
-
-        # Construct the state representation
-        state = [
-            paddle_x / game.WIDTH,
-            normalized_distance_to_paddle,
-            paddle_width / game.WIDTH,
-            ball_y / game.HEIGHT,
-            ball_x / game.WIDTH,
-            ball_speed_x / game.WIDTH,
-            ball_speed_y / game.HEIGHT,
-            normalized_distance_to_brick
-        ]
-
-        # Convert state to a single numpy array
-        state = np.array(state, dtype=np.float32)
-
-        # Convert the numpy array to a tensor
-        state = torch.tensor(state)
-
-        # Ensure state has the correct shape (1x7)
-        state = state.unsqueeze(0)  # Add a batch dimension
-
-        return state
-
-    def remember(self, state, action, reward, next_state, done):
-        self.memory.append((state, action, reward, next_state, done))
+    def get_action(self, state, episode_number):
+        # Calculate epsilon based on annealing schedule
+        self.epsilon = max(self.epsilon_min, self.epsilon_max * (self.epsilon_decay ** episode_number))
+        final_move = [0, 0, 0]
+        if random.uniform(0, 1) < self.epsilon:
+            move = random.randint(0, 2)
+            final_move[move] = 1
+        else:
+            # Choose action with the highest Q-value
+            state_tensor = torch.tensor(state, dtype=torch.float)
+            prediction = self.model(state_tensor)
+            move = torch.argmax(prediction).item()
+            final_move[move] = 1
+        return final_move
 
     def train_short_memory(self, state, action, reward, next_state, done):
         self.trainer.train_step(state, action, reward, next_state, done)
+        state_tensor = torch.tensor(state, dtype=torch.float)
+        prediction = self.model(state_tensor)
+        self.q_value_predictions.append(prediction.detach().numpy())  # Store predicted Q-values
+
 
     def train_long_memory(self):
         if len(self.memory) > BATCH_SIZE:
-            mini_sample = random.sample(self.memory, BATCH_SIZE)
+            mini_sample = np.random.choice(len(self.memory), BATCH_SIZE, replace=False)
+            states, actions, rewards, next_states, dones = zip(*[self.memory[idx] for idx in mini_sample])
         else:
-            mini_sample = self.memory
+            states, actions, rewards, next_states, dones = zip(*self.memory)
 
-        states, actions, rewards, next_states, dones = zip(*mini_sample)
 
         states = np.array([s.numpy() for s in states], dtype=np.float32)
         next_states = np.array([ns.numpy() for ns in next_states], dtype=np.float32)
@@ -101,47 +86,121 @@ class Agent:
         next_states = torch.tensor(next_states)
         dones = torch.tensor(dones, dtype=torch.bool).unsqueeze(1)
 
-        actions = torch.tensor(actions, dtype=torch.long).view(-1, 1)  # Reshape actions tensor
+        actions = torch.tensor(actions, dtype=torch.long).view(-1, 1)
 
         self.trainer.train_step(states, actions, rewards, next_states, dones)
 
-    def get_action(self, state):
-        self.epsilon = max(self.epsilon_min, self.epsilon * 0.995)  # Decay epsilon more gradually
+    def remember(self, state, action, reward, next_state, done):
+            experience = (state, action, reward, next_state, done)
+            self.memory.append(experience)
+            # print("Added experience to memory:", experience)
 
-        final_move = [0, 0, 0]
 
-        if random.uniform(0, 1) < self.epsilon:
-            move = random.randint(0, 2)
-            final_move[move] = 1
+    def get_state(self, game):
+        paddle_x = game.paddle.x
+        paddle_width = game.paddle.width
+        ball_x = game.ball.x
+        ball_y = game.ball.y
+        ball_speed_x, ball_speed_y = game.ball_speed
+        paddle_speed = game.paddle_speed
+
+        # Calculate distance to closest brick and its relative position
+        min_distance_to_brick = float('inf')
+        closest_brick_x, closest_brick_y = None, None
+        for brick, _ in game.bricks:
+            distance_to_brick = np.linalg.norm(np.array([ball_x, ball_y]) - np.array([brick.x + game.brick_width / 2, brick.y + game.brick_height / 2]))
+            if distance_to_brick < min_distance_to_brick:
+                min_distance_to_brick = distance_to_brick
+                closest_brick_x = brick.x
+                closest_brick_y = brick.y
+
+        # Calculate relative position of closest brick
+        relative_brick_x = (closest_brick_x - ball_x) / game.WIDTH
+        relative_brick_y = (closest_brick_y - ball_y) / game.HEIGHT
+
+        # Additional features
+        ball_future_x = ball_x + ball_speed_x  # Predicted future position of the ball
+        ball_future_y = ball_y + ball_speed_y
+        distance_to_wall_left = ball_x / game.WIDTH  # Distance to the left wall
+        distance_to_wall_right = (game.WIDTH - ball_x) / game.WIDTH  # Distance to the right wall
+        distance_to_ceiling = ball_y / game.HEIGHT  # Distance to the ceiling
+
+        # Calculate paddle and ball velocities
+        paddle_velocity = paddle_speed / PADDLE_SPEED  # Normalize paddle velocity
+        ball_velocity_x = ball_speed_x / game.WIDTH  # Normalize ball velocity in x-direction
+
+        # Calculate additional features here
+        # For example, distance to the nearest edge or center of the screen
+
+        state = [
+            paddle_x / game.WIDTH,
+            paddle_width / game.WIDTH,
+            ball_y / game.HEIGHT,
+            ball_x / game.WIDTH,
+            ball_speed_x / game.WIDTH,
+            ball_speed_y / game.HEIGHT,
+            min_distance_to_brick / np.sqrt(game.WIDTH**2 + game.HEIGHT**2),  # Normalized distance to closest brick
+            paddle_velocity,
+            relative_brick_x,  # Relative position of closest brick (x-coordinate)
+            relative_brick_y,  # Relative position of closest brick (y-coordinate)
+            ball_future_x / game.WIDTH,  # Predicted future position of the ball (x-coordinate)
+            ball_future_y / game.HEIGHT,  # Predicted future position of the ball (y-coordinate)
+            distance_to_wall_left,  # Distance to left wall
+            distance_to_wall_right,  # Distance to right wall
+            distance_to_ceiling,  # Distance to ceiling
+            ball_velocity_x,  # Ball velocity in x-direction
+            # Add more features here as needed
+        ]
+
+        # Normalize each feature to the range [0, 1]
+        min_val = min(state)
+        max_val = max(state)
+        state = [(s - min_val) / (max_val - min_val) for s in state]
+
+        state = np.array(state, dtype=np.float32)
+        state = torch.tensor(state)
+        state = state.unsqueeze(0)
+
+        return state
+
+    
+    def calculate_average_q_value(self):
+        if self.q_value_predictions:
+            q_values = np.concatenate(self.q_value_predictions, axis=0)
+            return np.mean(q_values, axis=0)
         else:
-            state_tensor = torch.tensor(state, dtype=torch.float)
-            prediction = self.model(state_tensor)
-            move = torch.argmax(prediction).item()
-            final_move[move] = 1
+            return None
 
-        return final_move
+
+
+
 
 
 def train():
+    plot_total_reward = []
+    total_reward = 0
     plot_scores = []
     plot_mean_scores = []
-    plot_median_scores = []  # Initialize list for median scores
-    bricks_remaining = []  # Track the number of remaining bricks
+    plot_median_scores = []
+    bricks_remaining = []
     total_score = 0
     record = 0
+    losses = []  # List to store losses
+    episode_number = 0
 
     game = BreakoutGameAI()
     agent = Agent(game.bricks)
 
     while True:
         state_old = agent.get_state(game)
-        final_move = agent.get_action(state_old)
+        final_move = agent.get_action(state_old, episode_number)
 
-        reward, done, score = game.play_step(final_move)  # Update to receive reward, game over flag, and score
-        reward = torch.tensor(reward, dtype=torch.float)  # Convert reward to a tensor
+        reward, done, score = game.play_step(final_move)
+        reward = torch.tensor(reward, dtype=torch.float)
         state_new = agent.get_state(game)
 
-        # Update the score based on the number of bricks destroyed
+        total_reward += reward
+
         if game.score > total_score:
             total_score = game.score
 
@@ -149,40 +208,62 @@ def train():
         agent.remember(state_old, final_move, reward, state_new, done)
 
         if done:
-            # Store the score before resetting the game
+            episode_number += 1
             plot_scores.append(total_score)
-            mean_score = total_score / (len(plot_scores) + 1)  # Update mean score
-            median_score = calculate_median(plot_scores)  # Calculate median score
+            plot_total_reward.append(total_reward)
+            mean_score = total_score / (len(plot_scores) + 1)
+            median_score = calculate_median(plot_scores)
             plot_mean_scores.append(mean_score)
-            plot_median_scores.append(median_score)  # Append median score
+            plot_median_scores.append(median_score)
             bricks_remaining.append(len(game.bricks))
 
             game.reset()
             agent.n_games += 1
+
+            # Calculate and log loss to determine if the agent is learning
+            loss = agent.trainer.train_step(state_old, final_move, reward, state_new, done)
+            losses.append(loss)  # Append loss to the list
+            print("Loss:", loss)
+
+            # Train long memory after loss calculation
             agent.train_long_memory()
 
             if total_score > record:
                 record = total_score
-                agent.model.save()  # Save the model when a new high score is achieved
+                agent.model.save()
 
-            print('Game', agent.n_games, 'Score', total_score, 'Record:', record)
-            total_score = 0  # Reset total score
+            # print('Game', agent.n_games, 'Score', total_score, 'Record:', record)
+            total_score = 0
 
-            plot(plot_scores, plot_mean_scores, plot_median_scores)  # Pass median scores to plot function
-            state_old = state_old.unsqueeze(0)
-            agent.train_long_memory()
+            total_reward = [total_reward]
+            plot(plot_scores, plot_mean_scores, plot_median_scores, losses, plot_total_reward)  # Pass losses to the plot function
+
+            # Log the exploration rate here as well
+            exploration_rate = agent.epsilon
+            agent.exploration_rates.append(exploration_rate)
+            # print("Exploration rate:", exploration_rate)
+
+            # print("reward", total_reward)
+
+            total_reward = 0
+
+            if agent.n_games % 10 == 0:
+                avg_q_value = agent.calculate_average_q_value()
+                if avg_q_value is not None:
+                    print(f"Average Q-value: {avg_q_value}")
+                print(f"After {agent.n_games} games - Highest Score: {record}, Mean Score: {mean_score}, Median Score: {median_score}, Loss: {loss}, Exploration Rate: {exploration_rate}")
+
 
 
 def calculate_median(scores):
     sorted_scores = sorted(scores)
     n = len(sorted_scores)
     if n % 2 == 0:
-        # If even number of scores, average the two middle values
         median = (sorted_scores[n // 2 - 1] + sorted_scores[n // 2]) / 2
     else:
-        # If odd number of scores, take the middle value
         median = sorted_scores[n // 2]
-    return median            
+    return median
+
 
 
 if __name__ == '__main__':
