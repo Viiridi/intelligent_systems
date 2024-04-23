@@ -11,10 +11,10 @@ pygame.init()
 font = pygame.font.Font(None, 36)
 
 WIDTH, HEIGHT = 600, 600
-PADDLE_WIDTH, PADDLE_HEIGHT = 75, 10
+PADDLE_WIDTH, PADDLE_HEIGHT = 100, 10
 BALL_RADIUS = 5
 PADDLE_SPEED = 12
-BALL_SPEED = 8
+BALL_SPEED = 4
 
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
@@ -37,6 +37,7 @@ class BreakoutGameAI:
         self.WIDTH = 600
         self.HEIGHT = 600
         self.brick_counter = 0
+        self.frame_count = 0
 
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
         pygame.display.set_caption("Breakout Game")
@@ -103,6 +104,7 @@ class BreakoutGameAI:
 
     def play_step(self, action):
         reward = 0  # Initialize reward here
+        self.frame_count += 1
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -120,14 +122,18 @@ class BreakoutGameAI:
         # Check for collision with paddle
         if self.is_collision(self.ball, self.paddle):
             self.ball_speed[1] = -self.ball_speed[1]
-            reward += 10  # Small positive reward for colliding with the paddle
+            reward = 1  # Small positive reward for colliding with the paddle
+
+        if self.ball_speed[1] > 0:  # Ensure the ball is moving downward
+            if abs(self.paddle.centerx - self.ball.centerx) < 20:  # Adjust threshold as needed
+                reward = 1  # Reward for being close to the ball's x-coordinate    
 
         # Check if ball falls off the bottom of the screen
         if self.ball.bottom >= HEIGHT:
             # Game over, reset the game
             self.reset()
             game_over = True
-            reward -= 5  # Negative reward for game over
+            reward = -5  # Negative reward for game over
             return reward, game_over, self.score
 
         # Check for collision with bricks
@@ -143,18 +149,18 @@ class BreakoutGameAI:
                 # If it's not the first brick, increase score and reward
                 if self.brick_counter > 1:
                     self.score += 100
-                    reward += 50
+                    reward = 5
 
                 game_over = len(self.bricks) == 0
                 return reward, game_over, self.score
 
         self._update_ui()
 
-        reward += 0.01
+        reward = 0.01
 
         game_over = False
 
-        self.clock.tick(120)  # Adjusted frame rate to 120 FPS for faster gameplay
+        self.clock.tick(10000)  # Adjusted frame rate to 120 FPS for faster gameplay
         return reward, game_over, self.score
 
     def reset_ball(self):
